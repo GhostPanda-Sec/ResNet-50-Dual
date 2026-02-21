@@ -1,0 +1,31 @@
+data:
+  root: "./data"
+  train_dir: "train"
+  val_dir: "val"
+  num_workers: 8  # 工业级多进程
+model:
+  num_classes: 1000
+train:
+  batch_size: 64  # 工业级batch_size
+  lr: 0.1
+  momentum: 0.9
+  weight_decay: 1e-4
+  epochs: 100
+  warmup_epochs: 5
+  min_lr: 1e-5
+  clip_grad: 5.0
+  mixup_alpha: 0.8        # MixUp参数
+  label_smoothing: 0.1    # 标签平滑参数
+  ema_decay: 0.9999       # EMA衰减系数
+  gradient_accumulation_steps: 1  # 梯度累积步数
+  save_freq: 10           # 每10轮保存一次检查点
+  dropout: 0.1            # Dropout概率
+  warmup_lr_init: 1e-6    # warmup初始学习率
+checkpoint:
+  dir: "checkpoints/resnet50_industrial"  # 工业级目录结构
+log_dir: "logs/resnet50_industrial"
+distributed:
+  enabled: true  # 默认开启分布式
+monitor:
+  log_freq: 50   # 每50个batch打印一次日志
+  save_best_only: true  # 仅保存最优模型
