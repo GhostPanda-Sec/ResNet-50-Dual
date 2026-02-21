@@ -1,0 +1,19 @@
+name: resnet50_train
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9  # 推荐 3.8-3.10 版本
+  - pytorch>=2.0.0
+  - torchvision>=0.15.0
+  - pytorch-cuda=11.8  # 根据显卡 CUDA 版本调整（如 11.7/12.1）
+  - numpy>=1.24.0
+  - pyyaml>=6.0
+  - tqdm>=4.65.0
+  - psutil>=5.9.0
+  - tensorboard>=2.12.0
+  - pip:
+    - onnx>=1.14.0
+    - onnxruntime>=1.15.0

@@ -123,8 +123,8 @@ class ResNet(nn.Module):
         downsample = None
         if stride != 1 or self.in_channels != out_channels * block.expansion:
             downsample = nn.Sequential(
-                nn.Conv2d(self.in_channels, out_channels * self.expansion, kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(out_channels * self.expansion),
+                nn.Conv2d(self.in_channels, out_channels * block.expansion, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels * block.expansion),
             )
         layers = []
         layers.append(block(self.in_channels, out_channels, stride, downsample))
@@ -193,8 +193,10 @@ def parse_args():
     parser.add_argument('--export-onnx', action='store_true', help='export best model to ONNX after training')
     args = parser.parse_args()
     
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
+    config = {}
+    if os.path.exists(args.config):
+        with open(args.config, 'r') as f:
+            config = yaml.safe_load(f)
     
     default_config = {
         'train': {
@@ -205,6 +207,14 @@ def parse_args():
             'save_freq': 10,
             'dropout': 0.1,
             'warmup_lr_init': 1e-6,
+            'clip_grad': 1.0,
+            'lr': 0.1,
+            'momentum': 0.9,
+            'weight_decay': 1e-4,
+            'warmup_epochs': 5,
+            'epochs': 100,
+            'min_lr': 1e-6,
+            'batch_size': 64
         },
         'distributed': {
             'enabled': True if args.local_rank != -1 else False,
@@ -213,6 +223,19 @@ def parse_args():
         'monitor': {
             'log_freq': 50,
             'save_best_only': True
+        },
+        'model': {
+            'num_classes': 1000
+        },
+        'data': {
+            'root': './dataset',
+            'train_dir': 'train',
+            'val_dir': 'val',
+            'num_workers': 8
+        },
+        'log_dir': './logs',
+        'checkpoint': {
+            'dir': './checkpoints'
         }
     }
     
@@ -414,7 +437,6 @@ def main_worker(local_rank, args, config):
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
 
     ema = EMA(model, decay=config['train']['ema_decay'])
-
     criterion = LabelSmoothingCrossEntropy(eps=config['train']['label_smoothing']).to(device)
     optimizer = optim.SGD(
         model.parameters(),
@@ -423,23 +445,6 @@ def main_worker(local_rank, args, config):
         weight_decay=config['train']['weight_decay'],
         nesterov=True
     )
-    warmup_scheduler = LinearLR(
-        optimizer,
-        start_factor=config['train']['warmup_lr_init'] / (config['train']['lr'] * world_size),
-        total_iters=config['train']['warmup_epochs'] * len(train_loader) // config['train']['gradient_accumulation_steps']
-    )
-    base_scheduler = CosineAnnealingLR(
-        optimizer,
-        T_max=(config['train']['epochs'] - config['train']['warmup_epochs']) * len(train_loader) // config['train']['gradient_accumulation_steps'],
-        eta_min=config['train']['min_lr'] * world_size
-    )
-    scheduler = SequentialLR(
-        optimizer,
-        schedulers=[warmup_scheduler, base_scheduler],
-        milestones=[config['train']['warmup_epochs'] * len(train_loader) // config['train']['gradient_accumulation_steps']]
-    )
-
-    scaler = GradScaler()
 
     train_transform = transforms.Compose([
         transforms.RandomResizedCrop(224, scale=(0.08, 1.0)),
@@ -492,6 +497,28 @@ def main_worker(local_rank, args, config):
         prefetch_factor=2
     )
 
+    warmup_iters = config['train']['warmup_epochs'] * len(train_loader) // config['train']['gradient_accumulation_steps']
+    total_iters = config['train']['epochs'] * len(train_loader) // config['train']['gradient_accumulation_steps']
+    base_iters = total_iters - warmup_iters
+
+    warmup_scheduler = LinearLR(
+        optimizer,
+        start_factor=config['train']['warmup_lr_init'] / (config['train']['lr'] * world_size),
+        total_iters=warmup_iters
+    )
+    base_scheduler = CosineAnnealingLR(
+        optimizer,
+        T_max=base_iters,
+        eta_min=config['train']['min_lr'] * world_size
+    )
+    scheduler = SequentialLR(
+        optimizer,
+        schedulers=[warmup_scheduler, base_scheduler],
+        milestones=[warmup_iters]
+    )
+
+    scaler = GradScaler()
+
     checkpoint_dir = config['checkpoint']['dir']
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, "latest.pth")
@@ -501,6 +528,7 @@ def main_worker(local_rank, args, config):
     best_acc = 0.0
     ema_best_acc = 0.0
     start_epoch = 0
+    checkpoint_dict = {}
 
     if (args.resume or os.path.exists(checkpoint_path)) and rank == 0:
         try:
@@ -582,12 +610,14 @@ def main_worker(local_rank, args, config):
     except KeyboardInterrupt:
         if rank == 0:
             logger.warning("Training interrupted by user, saving final checkpoint...")
-            torch.save(checkpoint_dict, checkpoint_path)
+            if checkpoint_dict:
+                torch.save(checkpoint_dict, checkpoint_path)
         sys.exit(0)
     except Exception as e:
         if rank == 0:
             logger.error(f"Training failed with error: {str(e)}", exc_info=True)
-            torch.save(checkpoint_dict, checkpoint_path)
+            if checkpoint_dict:
+                torch.save(checkpoint_dict, checkpoint_path)
         raise e
     finally:
         if rank == 0 and args.export_onnx:
@@ -619,4 +649,4 @@ if __name__ == "__main__":
     if config['distributed']['enabled']:
         mp.spawn(main_worker, args=(args, config), nprocs=torch.cuda.device_count(), join=True)
     else:
-        main_worker(args.local_rank, args, config)
+        main_worker(args.local_rank if args.local_rank != -1 else 0, args, config)
